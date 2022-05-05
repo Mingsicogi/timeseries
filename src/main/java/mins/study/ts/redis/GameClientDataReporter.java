@@ -2,8 +2,8 @@ package mins.study.ts.redis;
 
 
 import com.redislabs.redistimeseries.Aggregation;
-import com.redislabs.redistimeseries.DuplicatePolicy;
 import com.redislabs.redistimeseries.RedisTimeSeries;
+import com.redislabs.redistimeseries.Value;
 import io.lettuce.core.api.sync.RedisCommands;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -11,7 +11,6 @@ import org.apache.commons.lang3.RandomStringUtils;
 import org.redisson.api.RedissonClient;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
-import org.springframework.util.StopWatch;
 import redis.clients.jedis.exceptions.JedisDataException;
 
 import javax.annotation.PostConstruct;
@@ -19,7 +18,6 @@ import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static mins.study.ts.utils.RandomUtil.randomNumber;
@@ -58,14 +56,16 @@ public class GameClientDataReporter implements ReportSchedule {
                 Map<String, String> labels = new HashMap<>();
                 labels.put("gameCd", gameCd);
                 labels.put("type", CCU);
-                redisTimeSeries.create(GAME + ":" + index, RETENTION, labels);
-                redisTimeSeries.create(GAME + ":" + index + "-avg", RETENTION, null);
+                redisTimeSeries.create(GAME + ":" + index, RETENTION, labels); // TSDB
+                redisTimeSeries.create(GAME + ":" + index + "-avg", RETENTION, null); // for aggregation
                 redisTimeSeries.createRule(GAME + ":" + index, Aggregation.AVG, 60 /*1min*/, GAME + ":" + index + "-avg");
 
             } catch (JedisDataException e) {
                 if ("ERR TSDB: key already exists".equals(e.getMessage())) {
                     //pass
                     log.info("### already exists ###");
+                    Value value = redisTimeSeries.get(GAME + ":" + index);
+                    CCU_OF_GAME.get(gameCd).set((int)value.getValue());
                 }
             }
 
@@ -73,19 +73,26 @@ public class GameClientDataReporter implements ReportSchedule {
         }
     }
 
+    static int scheduleLoopCount = 0;
+
     @Override
-    @Scheduled(fixedRate = 1000)
+    @Scheduled(fixedRate = 100)
     public void loadData() {
+        scheduleLoopCount++;
         for (int i = 0; i < GAME_LIST.size(); i++) {
             String gameCd = GAME_LIST.get(i);
             AtomicInteger currentCcu = CCU_OF_GAME.get(gameCd);
-            int ccuOfGame = (int)((double)randomNumber(1, 10) * WEIGHT_OF_GAME.get(randomNumber(0, WEIGHT_OF_GAME.size() - 1))) + 1;
-
             int newCcu;
-            if (Integer.parseInt(RandomStringUtils.randomNumeric(1)) % 2 == 0) {
-                newCcu = currentCcu.addAndGet(ccuOfGame*2);
+            if (scheduleLoopCount % 600 == 0) {
+                newCcu = currentCcu.addAndGet(-(currentCcu.get()/2));
             } else {
-                newCcu = currentCcu.addAndGet(-(ccuOfGame/2));
+                int ccuOfGame = (int)((double)randomNumber(1, 10) * WEIGHT_OF_GAME.get(randomNumber(0, WEIGHT_OF_GAME.size() - 1))) + 1;
+                if (Integer.parseInt(RandomStringUtils.randomNumeric(1)) % 2 == 0) {
+                    newCcu = currentCcu.addAndGet(ccuOfGame*2);
+                } else {
+                    newCcu = currentCcu.addAndGet(-(ccuOfGame/2));
+                }
+
             }
 
             redisTimeSeries.add(GAME + ":" + i, System.currentTimeMillis(), newCcu, Map.of("gameCd", gameCd, "type", CCU));
